@@ -1,14 +1,12 @@
-import re
 import time
-from datetime import datetime, timedelta
 
 from requests.exceptions import HTTPError
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import engine
-from error import get_user_friendly_error
-from gemini_service import generate_summary
+from models import AudioFile
+from storage import supabase
+
 from gnani_service import (
     create_transcription_job,
     start_transcription_job,
@@ -16,127 +14,52 @@ from gnani_service import (
     get_transcription_files,
     download_transcript,
 )
-from models import AudioFile
-from storage import supabase
 
-
-MAX_GNANI_RETRIES = 3
-MAX_GEMINI_RETRIES = 3
-
-GNANI_DEFAULT_RETRY_SECONDS = 30
-GEMINI_DEFAULT_RETRY_SECONDS = 60
-
-WORKER_IDLE_SECONDS = 5
-WORKER_BETWEEN_JOBS_SECONDS = 2
+from gemini_service import generate_summary
+from error import get_user_friendly_error
 
 
 # ============================================================
-# RETRY DELAY
+# DATABASE HELPERS
 # ============================================================
 
-def extract_retry_delay(error: Exception) -> int | None:
+
+def update_job(audio_id: str, **fields):
     """
-    Extract a retry delay from a provider error when available.
-    """
-
-    message = str(error)
-
-    match = re.search(
-        r"retry in "
-        r"(?:(\d+(?:\.\d+)?)h)?"
-        r"(?:(\d+(?:\.\d+)?)m)?"
-        r"(?:(\d+(?:\.\d+)?)s)?",
-        message,
-        re.IGNORECASE,
-    )
-
-    if match:
-        hours = float(match.group(1) or 0)
-        minutes = float(match.group(2) or 0)
-        seconds = float(match.group(3) or 0)
-
-        total_seconds = (
-            hours * 3600
-            + minutes * 60
-            + seconds
-        )
-
-        if total_seconds > 0:
-            return int(total_seconds)
-
-    match = re.search(
-        r"retryDelay[\"']?\s*[:=]\s*[\"']?(\d+(?:\.\d+)?)s",
-        message,
-        re.IGNORECASE,
-    )
-
-    if match:
-        return int(float(match.group(1)))
-
-    return None
-
-
-# ============================================================
-# DATABASE
-# ============================================================
-
-def get_next_job():
-    """
-    Get the next eligible job.
-
-    Jobs waiting for a future retry time are ignored.
+    Update fields of one audio_files row.
     """
 
     with Session(engine) as db:
-
-        now = datetime.utcnow()
-
-        retry_ready = or_(
-            AudioFile.next_retry_at.is_(None),
-            AudioFile.next_retry_at <= now,
-        )
-
-        # Fresh transcription work gets priority.
         audio_file = (
             db.query(AudioFile)
-            .filter(
-                AudioFile.status.in_(
-                    ["uploaded", "processing"]
-                ),
-                retry_ready,
-            )
-            .order_by(
-                AudioFile.created_at.asc()
-            )
+            .filter(AudioFile.id == audio_id)
             .first()
         )
 
-        # Then process eligible summary jobs.
         if not audio_file:
+            print("Database row not found:", audio_id)
+            return
 
-            audio_file = (
-                db.query(AudioFile)
-                .filter(
-                    AudioFile.status == "transcribed",
-                    AudioFile.summary.is_(None),
-                    retry_ready,
-                )
-                .order_by(
-                    AudioFile.created_at.asc()
-                )
-                .first()
-            )
+        for key, value in fields.items():
+            setattr(audio_file, key, value)
+
+        db.commit()
+
+
+def get_audio_job(audio_id: str):
+    """
+    Load one audio job from the database.
+    """
+
+    with Session(engine) as db:
+        audio_file = (
+            db.query(AudioFile)
+            .filter(AudioFile.id == audio_id)
+            .first()
+        )
 
         if not audio_file:
             return None
-
-        if audio_file.status == "uploaded":
-
-            audio_file.status = "processing"
-            audio_file.progress_percent = 0
-            audio_file.error_message = None
-
-            db.commit()
 
         return {
             "id": audio_file.id,
@@ -146,182 +69,19 @@ def get_next_job():
             "status": audio_file.status,
             "transcript": audio_file.transcript,
             "summary": audio_file.summary,
-            "gnani_retry_count": audio_file.gnani_retry_count,
-            "gemini_retry_count": audio_file.gemini_retry_count,
-            "next_retry_at": audio_file.next_retry_at,
         }
 
 
-def update_job(audio_id, **fields):
-    with Session(engine) as db:
-
-        audio_file = (
-            db.query(AudioFile)
-            .filter(
-                AudioFile.id == audio_id
-            )
-            .first()
-        )
-
-        if not audio_file:
-            print(
-                "Database row not found:",
-                audio_id,
-            )
-            return
-
-        for key, value in fields.items():
-            setattr(audio_file, key, value)
-
-        db.commit()
-
-
 # ============================================================
-# GNANI RETRY
+# GNANI JOB CREATION
 # ============================================================
 
-def schedule_gnani_retry(job, error: Exception):
-
-    current_count = job["gnani_retry_count"]
-    next_count = current_count + 1
-
-    if next_count > MAX_GNANI_RETRIES:
-
-        friendly_error = get_user_friendly_error(
-            "gnani",
-            error,
-        )
-
-        print(
-            "Gnani retry limit reached."
-        )
-
-        update_job(
-            job["id"],
-            status="failed",
-            error_message=friendly_error,
-            next_retry_at=None,
-            gnani_retry_count=current_count,
-            gnani_job_id=None,
-        )
-
-        return
-
-    provider_delay = extract_retry_delay(error)
-
-    if provider_delay is not None:
-        delay_seconds = provider_delay
-    else:
-        delay_seconds = (
-            GNANI_DEFAULT_RETRY_SECONDS
-            * (2 ** (next_count - 1))
-        )
-
-    next_retry_at = (
-        datetime.utcnow()
-        + timedelta(seconds=delay_seconds)
-    )
-
-    friendly_error = get_user_friendly_error(
-        "gnani",
-        error,
-    )
-
-    print(
-        f"Gnani retry "
-        f"{next_count}/{MAX_GNANI_RETRIES}"
-    )
-
-    print(
-        "Next retry at:",
-        next_retry_at,
-    )
-
-    update_job(
-        job["id"],
-        status="processing",
-        error_message=friendly_error,
-        gnani_retry_count=next_count,
-        next_retry_at=next_retry_at,
-    )
-
-
-# ============================================================
-# GEMINI RETRY
-# ============================================================
-
-def schedule_gemini_retry(job, error: Exception):
-
-    current_count = job["gemini_retry_count"]
-    next_count = current_count + 1
-
-    if next_count > MAX_GEMINI_RETRIES:
-
-        friendly_error = get_user_friendly_error(
-            "gemini",
-            error,
-        )
-
-        print(
-            "Gemini retry limit reached."
-        )
-
-        update_job(
-            job["id"],
-            status="failed",
-            progress_percent=80,
-            error_message=friendly_error,
-            next_retry_at=None,
-            gemini_retry_count=current_count,
-        )
-
-        return
-
-    provider_delay = extract_retry_delay(error)
-
-    if provider_delay is not None:
-        delay_seconds = provider_delay
-    else:
-        delay_seconds = (
-            GEMINI_DEFAULT_RETRY_SECONDS
-            * (2 ** (next_count - 1))
-        )
-
-    next_retry_at = (
-        datetime.utcnow()
-        + timedelta(seconds=delay_seconds)
-    )
-
-    friendly_error = get_user_friendly_error(
-        "gemini",
-        error,
-    )
-
-    print(
-        f"Gemini retry "
-        f"{next_count}/{MAX_GEMINI_RETRIES}"
-    )
-
-    print(
-        "Next retry at:",
-        next_retry_at,
-    )
-
-    update_job(
-        job["id"],
-        status="transcribed",
-        progress_percent=80,
-        error_message=friendly_error,
-        gemini_retry_count=next_count,
-        next_retry_at=next_retry_at,
-    )
-
-
-# ============================================================
-# GNANI
-# ============================================================
 
 def create_gnani_job(job):
+    """
+    Create a Gnani Batch job using a temporary
+    signed Supabase Storage URL.
+    """
 
     print("Creating Gnani job...")
 
@@ -337,61 +97,106 @@ def create_gnani_job(job):
 
     signed_url = signed_result["signedURL"]
 
-    response = create_transcription_job(
+    print("Signed URL created")
+
+    gnani_response = create_transcription_job(
         signed_url
     )
 
-    gnani_job_id = response["job_id"]
+    gnani_job_id = gnani_response["job_id"]
 
-    print(
-        "Gnani job created:",
-        gnani_job_id,
-    )
+    print("Gnani job created:", gnani_job_id)
 
+    # Save immediately so that if the process is interrupted,
+    # we don't create a duplicate Gnani job later.
     update_job(
         job["id"],
         gnani_job_id=gnani_job_id,
         progress_percent=10,
         error_message=None,
-        next_retry_at=None,
     )
 
     return gnani_job_id
 
 
-def start_gnani_job(job_id):
+# ============================================================
+# GNANI START
+# ============================================================
 
-    return start_transcription_job(
-        job_id
+
+def start_gnani_job(job_id: str):
+    """
+    Start a Gnani job.
+
+    A few short retries are made for temporary HTTP 429
+    rate limiting.
+    """
+
+    max_attempts = 3
+
+    for attempt in range(max_attempts):
+        try:
+            return start_transcription_job(job_id)
+
+        except HTTPError as error:
+            response = error.response
+
+            if (
+                response is not None
+                and response.status_code == 429
+            ):
+                wait_time = 20 * (2 ** attempt)
+
+                print(
+                    f"Gnani rate limited us. "
+                    f"Waiting {wait_time} seconds..."
+                )
+
+                time.sleep(wait_time)
+                continue
+
+            raise
+
+    raise RuntimeError(
+        "Gnani could not be started after temporary retries."
     )
 
 
 # ============================================================
-# TRANSCRIPTION
+# GNANI TRANSCRIPTION
 # ============================================================
 
+
 def process_transcription(job):
+    """
+    Process one audio file through Gnani.
+
+    Returns:
+        transcript string
+    """
 
     audio_id = job["id"]
+
+    # --------------------------------------------------------
+    # 1. Get existing Gnani job or create a new one
+    # --------------------------------------------------------
+
     gnani_job_id = job["gnani_job_id"]
 
     if not gnani_job_id:
-
-        gnani_job_id = create_gnani_job(
-            job
-        )
-
+        gnani_job_id = create_gnani_job(job)
     else:
-
         print(
             "Resuming Gnani job:",
             gnani_job_id,
         )
 
-    status_response = (
-        get_transcription_status(
-            gnani_job_id
-        )
+    # --------------------------------------------------------
+    # 2. Check current Gnani status
+    # --------------------------------------------------------
+
+    status_response = get_transcription_status(
+        gnani_job_id
     )
 
     status = status_response["status"]
@@ -401,19 +206,21 @@ def process_transcription(job):
         status,
     )
 
+    # --------------------------------------------------------
+    # 3. Start if job is still CREATED
+    # --------------------------------------------------------
+
     if status == "CREATED":
 
-        start_response = (
-            start_gnani_job(
-                gnani_job_id
-            )
+        start_response = start_gnani_job(
+            gnani_job_id
         )
 
         print(
             "Gnani start:",
-            start_response.get(
-                "status"
-            ),
+            start_response.get("status")
+            if start_response
+            else "unknown",
         )
 
         update_job(
@@ -421,12 +228,14 @@ def process_transcription(job):
             progress_percent=20,
         )
 
+    # --------------------------------------------------------
+    # 4. Poll until Gnani finishes
+    # --------------------------------------------------------
+
     while True:
 
-        status_response = (
-            get_transcription_status(
-                gnani_job_id
-            )
+        status_response = get_transcription_status(
+            gnani_job_id
         )
 
         status = status_response["status"]
@@ -449,6 +258,8 @@ def process_transcription(job):
 
         if percent is not None:
 
+            # Keep room for transcript download
+            # and Gemini processing.
             db_percent = min(
                 int(percent),
                 95,
@@ -462,11 +273,10 @@ def process_transcription(job):
         if status == "COMPLETED":
             break
 
-        if status in [
-            "FAILED",
-            "CANCELLED",
-        ]:
+        if status in ["FAILED", "CANCELLED"]:
 
+            # Clear the provider job ID because this
+            # provider job can no longer be resumed.
             update_job(
                 audio_id,
                 gnani_job_id=None,
@@ -478,15 +288,17 @@ def process_transcription(job):
 
         time.sleep(10)
 
+    # --------------------------------------------------------
+    # 5. Get transcript file
+    # --------------------------------------------------------
+
     update_job(
         audio_id,
         progress_percent=97,
     )
 
-    files_response = (
-        get_transcription_files(
-            gnani_job_id
-        )
+    files_response = get_transcription_files(
+        gnani_job_id
     )
 
     if not files_response.get("data"):
@@ -497,14 +309,16 @@ def process_transcription(job):
 
     file_info = files_response["data"][0]
 
-    transcript_url = (
-        file_info["transcript_url"]
-    )
+    transcript_url = file_info[
+        "transcript_url"
+    ]
 
-    transcript_data = (
-        download_transcript(
-            transcript_url
-        )
+    # --------------------------------------------------------
+    # 6. Download transcript JSON
+    # --------------------------------------------------------
+
+    transcript_data = download_transcript(
+        transcript_url
     )
 
     transcript = transcript_data.get(
@@ -518,6 +332,13 @@ def process_transcription(job):
             "full_transcript."
         )
 
+    print("Transcript:")
+    print(transcript)
+
+    # --------------------------------------------------------
+    # 7. Save transcript
+    # --------------------------------------------------------
+
     update_job(
         audio_id,
         transcript=transcript,
@@ -526,12 +347,9 @@ def process_transcription(job):
         error_message=None,
         next_retry_at=None,
         gnani_retry_count=0,
-        gemini_retry_count=0,
     )
 
-    print(
-        "Transcript saved."
-    )
+    print("✅ Transcript saved")
 
     return transcript
 
@@ -540,23 +358,24 @@ def process_transcription(job):
 # GEMINI SUMMARY
 # ============================================================
 
+
 def process_summary(job, transcript):
+    """
+    Generate and save Gemini summary.
+    """
 
     audio_id = job["id"]
 
     if not transcript:
-
         raise RuntimeError(
             "Cannot generate summary without transcript."
         )
 
+    print("Generating Gemini summary...")
+
     update_job(
         audio_id,
         progress_percent=90,
-    )
-
-    print(
-        "Generating Gemini summary..."
     )
 
     summary = generate_summary(
@@ -569,6 +388,13 @@ def process_summary(job, transcript):
             "Gemini returned an empty summary."
         )
 
+    print("Summary:")
+    print(summary)
+
+    # --------------------------------------------------------
+    # Save final result
+    # --------------------------------------------------------
+
     update_job(
         audio_id,
         summary=summary,
@@ -579,30 +405,44 @@ def process_summary(job, transcript):
         gemini_retry_count=0,
     )
 
-    print(
-        "Summary saved."
-    )
+    print("✅ Summary saved")
+    print("✅ Job completed")
 
 
 # ============================================================
 # PROCESS ONE JOB
 # ============================================================
 
+
 def process_job(job):
+    """
+    Process exactly one database job.
+
+    This function does not search for the next job.
+    FastAPI decides which job should be processed.
+    """
 
     print()
     print("=" * 60)
     print("Processing:", job["id"])
     print("Filename:", job["filename"])
-    print("Status:", job["status"])
+    print("Current status:", job["status"])
     print("=" * 60)
 
-    # Existing transcript -> Gemini only
+    # --------------------------------------------------------
+    # CASE 1:
+    # Transcript already exists
+    # Only Gemini is required.
+    # --------------------------------------------------------
+
     if (
         job["status"] == "transcribed"
         and job["transcript"]
         and not job["summary"]
     ):
+
+        print("Transcript already exists.")
+        print("Generating Gemini summary...")
 
         try:
 
@@ -614,81 +454,63 @@ def process_job(job):
         except Exception as error:
 
             print(
-                "GEMINI ERROR:",
+                "❌ GEMINI ERROR:",
                 repr(error),
             )
 
-            schedule_gemini_retry(
-                job,
-                error,
+            update_job(
+                job["id"],
+                status="transcribed",
+                progress_percent=80,
+                error_message=get_user_friendly_error(
+                    "gemini",
+                    error,
+                ),
+                next_retry_at=None,
+            )
+
+            print(
+                "Transcript is safe."
             )
 
         return
 
-    # Transcription
+    # --------------------------------------------------------
+    # CASE 2:
+    # Audio still needs transcription
+    # --------------------------------------------------------
+
     try:
 
         transcript = process_transcription(
             job
         )
 
-    except HTTPError as error:
+    except Exception as error:
 
         print(
-            "GNANI HTTP ERROR:",
+            "❌ GNANI ERROR:",
             repr(error),
-        )
-
-        status_code = (
-            error.response.status_code
-            if error.response is not None
-            else None
-        )
-
-        if status_code in [
-            429,
-            500,
-            502,
-            503,
-            504,
-        ]:
-
-            schedule_gnani_retry(
-                job,
-                error,
-            )
-
-            return
-
-        friendly_error = get_user_friendly_error(
-            "gnani",
-            error,
         )
 
         update_job(
             job["id"],
             status="failed",
-            error_message=friendly_error,
+            progress_percent=0,
+            error_message=get_user_friendly_error(
+                "gnani",
+                error,
+            ),
             next_retry_at=None,
         )
 
         return
 
-    except Exception as error:
-
-        print(
-            "GNANI PROCESSING ERROR:",
-            repr(error),
-        )
-
-        schedule_gnani_retry(
-            job,
-            error,
-        )
-
-        return
-
+    # --------------------------------------------------------
+    # CASE 3:
     # Gnani succeeded -> Gemini
+    # --------------------------------------------------------
+
     try:
 
         process_summary(
@@ -699,57 +521,79 @@ def process_job(job):
     except Exception as error:
 
         print(
-            "GEMINI ERROR:",
+            "❌ GEMINI ERROR:",
             repr(error),
         )
 
-        schedule_gemini_retry(
-            job,
-            error,
+        # Transcript succeeded, so keep it.
+        update_job(
+            job["id"],
+            status="transcribed",
+            progress_percent=80,
+            error_message=get_user_friendly_error(
+                "gemini",
+                error,
+            ),
+            next_retry_at=None,
+        )
+
+        print(
+            "Transcript is safe."
         )
 
 
 # ============================================================
-# WORKER LOOP
+# FASTAPI BACKGROUND ENTRY POINT
 # ============================================================
 
-def worker_loop():
 
+def process_audio_job(audio_id: str):
+    """
+    Entry point called by FastAPI BackgroundTasks.
+
+    It loads one audio record and processes that
+    specific record.
+    """
+
+    print()
+    print("=" * 60)
     print(
-        "Background worker started"
+        "Background task started:",
+        audio_id,
+    )
+    print("=" * 60)
+
+    job = get_audio_job(
+        audio_id
     )
 
-    while True:
+    if not job:
 
-        try:
+        print(
+            "Audio file not found:",
+            audio_id,
+        )
 
-            job = get_next_job()
+        return
 
-            if not job:
+    # A newly uploaded file is now being processed.
+    if job["status"] == "uploaded":
 
-                time.sleep(
-                    WORKER_IDLE_SECONDS
-                )
+        update_job(
+            audio_id,
+            status="processing",
+            progress_percent=0,
+            error_message=None,
+        )
 
-                continue
+        job["status"] = "processing"
 
-            process_job(job)
+    process_job(job)
 
-            time.sleep(
-                WORKER_BETWEEN_JOBS_SECONDS
-            )
-
-        except Exception as error:
-
-            print(
-                "WORKER ERROR:",
-                repr(error),
-            )
-
-            time.sleep(
-                WORKER_IDLE_SECONDS
-            )
-
-
-if __name__ == "__main__":
-    worker_loop()
+    print()
+    print("=" * 60)
+    print(
+        "Background task finished:",
+        audio_id,
+    )
+    print("=" * 60)

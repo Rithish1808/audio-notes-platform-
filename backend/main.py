@@ -1,10 +1,11 @@
 import os
 import shutil
 import tempfile
-from uuid import uuid4
+from datetime import datetime
 
 from dotenv import load_dotenv
 from fastapi import (
+    BackgroundTasks,
     FastAPI,
     File,
     HTTPException,
@@ -17,20 +18,14 @@ from database import engine
 from error import get_user_friendly_error
 from models import AudioFile
 from storage import supabase
+from worker import process_audio_job
 
+
+# ============================================================
+# CONFIG
+# ============================================================
 
 load_dotenv()
-
-
-app = FastAPI(
-    title="Audio Notes API",
-    description="Backend for the Audio Notes Platform",
-)
-
-
-# ============================================================
-# CORS
-# ============================================================
 
 frontend_url = os.getenv(
     "FRONTEND_URL",
@@ -46,6 +41,16 @@ if frontend_url not in allowed_origins:
     allowed_origins.append(frontend_url)
 
 
+# ============================================================
+# FASTAPI APP
+# ============================================================
+
+app = FastAPI(
+    title="Audio Notes API",
+    description="Backend for the Audio Notes Platform",
+)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -59,6 +64,7 @@ app.add_middleware(
 # HOME
 # ============================================================
 
+
 @app.get("/")
 def home():
     return {
@@ -70,47 +76,93 @@ def home():
 # UPLOAD
 # ============================================================
 
+
 @app.post("/upload")
 async def upload_audio(
-    file: UploadFile = File(...)
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
 ):
+    """
+    Upload an audio file to Supabase Storage,
+    create a database job, and start processing
+    in the background.
+    """
+
+    # --------------------------------------------------------
+    # Validate filename
+    # --------------------------------------------------------
+
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Please select an audio file.",
+        )
+
+    # --------------------------------------------------------
+    # Validate content type
+    # --------------------------------------------------------
+
+    if not file.content_type:
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded file has no content type.",
+        )
+
+    if not file.content_type.startswith("audio/"):
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload an audio file.",
+        )
 
     temp_file_path = None
 
     try:
 
-        if not file.filename:
-            raise HTTPException(
-                status_code=400,
-                detail="Please select an audio file."
-            )
+        # ----------------------------------------------------
+        # Create storage path
+        # ----------------------------------------------------
 
-        if not file.content_type:
-            raise HTTPException(
-                status_code=400,
-                detail="The file type could not be detected."
-            )
-
-        if not file.content_type.startswith("audio/"):
-            raise HTTPException(
-                status_code=400,
-                detail="Please upload an audio file."
-            )
-
-        suffix = ""
+        file_extension = ""
 
         if "." in file.filename:
-            suffix = (
-                "."
-                + file.filename.rsplit(
-                    ".",
-                    1
-                )[1]
+            file_extension = (
+                "." + file.filename.rsplit(".", 1)[1].lower()
             )
+
+        audio_id = None
+
+        # Generate the DB ID first so that the storage path
+        # is unique and connected to the database record.
+        with Session(engine) as db:
+
+            audio_file = AudioFile(
+                filename=file.filename,
+                storage_path="",
+                content_type=file.content_type,
+                status="uploaded",
+                progress_percent=0,
+                gnani_retry_count=0,
+                gemini_retry_count=0,
+                next_retry_at=None,
+            )
+
+            db.add(audio_file)
+            db.commit()
+            db.refresh(audio_file)
+
+            audio_id = audio_file.id
+
+        storage_path = (
+            f"uploads/{audio_id}{file_extension}"
+        )
+
+        # ----------------------------------------------------
+        # Save upload temporarily on disk
+        # ----------------------------------------------------
 
         with tempfile.NamedTemporaryFile(
             delete=False,
-            suffix=suffix,
+            suffix=file_extension,
         ) as temp_file:
 
             temp_file_path = temp_file.name
@@ -121,58 +173,67 @@ async def upload_audio(
                 length=1024 * 1024,
             )
 
-        file_path = (
-            f"{uuid4()}_{file.filename}"
-        )
+        # ----------------------------------------------------
+        # Upload temporary file to Supabase Storage
+        # ----------------------------------------------------
 
         with open(
             temp_file_path,
             "rb",
         ) as temp_file:
 
-            (
-                supabase
-                .storage
-                .from_("audio")
-                .upload(
-                    file=temp_file,
-                    path=file_path,
-                    file_options={
-                        "content-type": (
-                            file.content_type
-                            or "application/octet-stream"
-                        )
-                    },
-                )
+            supabase.storage.from_("audio").upload(
+                file=temp_file,
+                path=storage_path,
+                file_options={
+                    "content-type": (
+                        file.content_type
+                        or "application/octet-stream"
+                    )
+                },
             )
+
+        # ----------------------------------------------------
+        # Save final storage path in database
+        # ----------------------------------------------------
 
         with Session(engine) as db:
 
-            audio_file = AudioFile(
-                filename=file.filename,
-                storage_path=file_path,
-                content_type=file.content_type,
-                status="uploaded",
-                progress_percent=0,
-                error_message=None,
-                gnani_retry_count=0,
-                gemini_retry_count=0,
-                next_retry_at=None,
+            audio_file = (
+                db.query(AudioFile)
+                .filter(
+                    AudioFile.id == audio_id
+                )
+                .first()
             )
 
-            db.add(audio_file)
+            if not audio_file:
+                raise RuntimeError(
+                    "Database record disappeared after upload."
+                )
+
+            audio_file.storage_path = storage_path
+            audio_file.status = "uploaded"
+            audio_file.progress_percent = 0
+            audio_file.error_message = None
 
             db.commit()
-            db.refresh(audio_file)
 
-            return {
-                "id": audio_file.id,
-                "filename": audio_file.filename,
-                "status": audio_file.status,
-                "progress_percent": (
-                    audio_file.progress_percent
-                ),
-            }
+        # ----------------------------------------------------
+        # Start background processing
+        # ----------------------------------------------------
+
+        background_tasks.add_task(
+            process_audio_job,
+            audio_id,
+        )
+
+        return {
+            "id": audio_id,
+            "filename": file.filename,
+            "status": "uploaded",
+            "progress": 0,
+        }
 
     except HTTPException:
         raise
@@ -180,9 +241,45 @@ async def upload_audio(
     except Exception as error:
 
         print(
-            "UPLOAD ERROR:",
+            "❌ UPLOAD ERROR:",
             repr(error),
         )
+
+        # If the DB record was created but storage upload
+        # failed, mark that record as failed.
+        if audio_id:
+
+            try:
+
+                with Session(engine) as db:
+
+                    audio_file = (
+                        db.query(AudioFile)
+                        .filter(
+                            AudioFile.id == audio_id
+                        )
+                        .first()
+                    )
+
+                    if audio_file:
+
+                        audio_file.status = "failed"
+                        audio_file.progress_percent = 0
+                        audio_file.error_message = (
+                            get_user_friendly_error(
+                                "upload",
+                                error,
+                            )
+                        )
+
+                        db.commit()
+
+            except Exception as db_error:
+
+                print(
+                    "❌ FAILED TO SAVE UPLOAD ERROR:",
+                    repr(db_error),
+                )
 
         raise HTTPException(
             status_code=500,
@@ -204,11 +301,15 @@ async def upload_audio(
 
 
 # ============================================================
-# LIST
+# LIST AUDIO FILES
 # ============================================================
 
+
 @app.get("/audio")
-def get_audio_files():
+def list_audio():
+    """
+    Return newest audio records first.
+    """
 
     with Session(engine) as db:
 
@@ -222,27 +323,36 @@ def get_audio_files():
 
         return [
             {
-                "id": audio.id,
-                "filename": audio.filename,
-                "status": audio.status,
-                "progress_percent": (
-                    audio.progress_percent
+                "id": audio_file.id,
+                "filename": audio_file.filename,
+                "status": audio_file.status,
+                "progress": (
+                    audio_file.progress_percent
                 ),
                 "error_message": (
-                    audio.error_message
+                    audio_file.error_message
                 ),
-                "created_at": audio.created_at,
+                "created_at": (
+                    audio_file.created_at.isoformat()
+                    if audio_file.created_at
+                    else None
+                ),
             }
-            for audio in audio_files
+            for audio_file in audio_files
         ]
 
 
 # ============================================================
-# SINGLE AUDIO
+# GET ONE AUDIO FILE
 # ============================================================
+
 
 @app.get("/audio/{audio_id}")
 def get_audio(audio_id: str):
+    """
+    Return one audio record with transcript,
+    summary, progress and processing status.
+    """
 
     with Session(engine) as db:
 
@@ -257,7 +367,7 @@ def get_audio(audio_id: str):
         if not audio_file:
             raise HTTPException(
                 status_code=404,
-                detail="Audio file not found."
+                detail="Audio file not found.",
             )
 
         return {
@@ -267,13 +377,13 @@ def get_audio(audio_id: str):
             "status": audio_file.status,
             "transcript": audio_file.transcript,
             "summary": audio_file.summary,
-            "error_message": (
-                audio_file.error_message
+            "error_message": audio_file.error_message,
+            "progress": audio_file.progress_percent,
+            "created_at": (
+                audio_file.created_at.isoformat()
+                if audio_file.created_at
+                else None
             ),
-            "progress_percent": (
-                audio_file.progress_percent
-            ),
-            "created_at": audio_file.created_at,
             "gnani_retry_count": (
                 audio_file.gnani_retry_count
             ),
@@ -281,7 +391,9 @@ def get_audio(audio_id: str):
                 audio_file.gemini_retry_count
             ),
             "next_retry_at": (
-                audio_file.next_retry_at
+                audio_file.next_retry_at.isoformat()
+                if audio_file.next_retry_at
+                else None
             ),
         }
 
@@ -290,8 +402,16 @@ def get_audio(audio_id: str):
 # RETRY
 # ============================================================
 
+
 @app.post("/audio/{audio_id}/retry")
-def retry_audio(audio_id: str):
+def retry_audio(
+    audio_id: str,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Reset a failed job and process it again
+    in the background.
+    """
 
     with Session(engine) as db:
 
@@ -304,38 +424,53 @@ def retry_audio(audio_id: str):
         )
 
         if not audio_file:
-
             raise HTTPException(
                 status_code=404,
-                detail="Audio file not found."
+                detail="Audio file not found.",
             )
 
-        audio_file.gnani_retry_count = 0
-        audio_file.gemini_retry_count = 0
-        audio_file.next_retry_at = None
-        audio_file.error_message = None
+        # ----------------------------------------------------
+        # Case 1:
+        # Transcript already exists.
+        # Only Gemini needs to run again.
+        # ----------------------------------------------------
 
-        # Transcript exists -> only retry summary.
         if audio_file.transcript:
 
             audio_file.status = "transcribed"
             audio_file.progress_percent = 80
+            audio_file.error_message = None
+            audio_file.gemini_retry_count = 0
+            audio_file.next_retry_at = None
 
-        # Transcript doesn't exist -> restart transcription.
+        # ----------------------------------------------------
+        # Case 2:
+        # No transcript.
+        # Start from Gnani again.
+        # ----------------------------------------------------
+
         else:
 
             audio_file.status = "uploaded"
             audio_file.progress_percent = 0
+            audio_file.error_message = None
             audio_file.gnani_job_id = None
+            audio_file.gnani_retry_count = 0
+            audio_file.gemini_retry_count = 0
+            audio_file.next_retry_at = None
 
         db.commit()
-        db.refresh(audio_file)
 
-        return {
-            "id": audio_file.id,
-            "status": audio_file.status,
-            "progress_percent": (
-                audio_file.progress_percent
-            ),
-            "message": "Retry started.",
-        }
+    # --------------------------------------------------------
+    # Start processing in the background
+    # --------------------------------------------------------
+
+    background_tasks.add_task(
+        process_audio_job,
+        audio_id,
+    )
+
+    return {
+        "id": audio_id,
+        "message": "Retry started.",
+    }

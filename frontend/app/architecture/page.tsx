@@ -2,518 +2,416 @@ import Link from "next/link";
 
 export default function ArchitecturePage() {
   return (
-    <section className="page-section architecture-page">
+    <div className="architecture-page">
+      <div className="page-header">
+        <div>
+          <p className="section-label">ARCHITECTURE</p>
+          <h1>How Audio Notes works</h1>
+          <p className="page-subtitle">
+            Upload an audio recording and follow it through storage,
+            transcription, summarization, and the final note.
+          </p>
+        </div>
 
-      <div className="architecture-header">
+        <a
+          href="https://github.com/Rithish1808/audio-notes-platform-"
+          target="_blank"
+          rel="noreferrer"
+          className="github-link"
+        >
+          View GitHub ↗
+        </a>
+      </div>
 
-        <p className="section-label">
-          DOCUMENTATION
-        </p>
+      {/* ===================================================== */}
+      {/* 01 — OVERALL FLOW */}
+      {/* ===================================================== */}
 
-        <h1>
-          System Architecture
-        </h1>
+      <section className="architecture-section">
+        <div className="section-heading">
+          <span>01</span>
+          <div>
+            <h2>Overall Flow</h2>
+            <p>
+              The upload request is kept short. Audio processing continues
+              in the background after the API sends the initial response.
+            </p>
+          </div>
+        </div>
 
-        <p>
-          How the Audio Notes Platform handles uploads,
-          transcription, summarization, and long-running
-          processing.
-        </p>
+        <div className="architecture-flow">
+          <div className="flow-card">
+            <span className="flow-number">01</span>
+            <h3>Upload</h3>
+            <p>
+              The user selects an audio file from the Next.js frontend.
+            </p>
+          </div>
+
+          <div className="flow-arrow">→</div>
+
+          <div className="flow-card">
+            <span className="flow-number">02</span>
+            <h3>Store</h3>
+            <p>
+              FastAPI uploads the audio to the private Supabase Storage
+              bucket and creates a PostgreSQL record.
+            </p>
+          </div>
+
+          <div className="flow-arrow">→</div>
+
+          <div className="flow-card">
+            <span className="flow-number">03</span>
+            <h3>Background Job</h3>
+            <p>
+              FastAPI returns the job ID and starts background processing.
+            </p>
+          </div>
+
+          <div className="flow-arrow">→</div>
+
+          <div className="flow-card">
+            <span className="flow-number">04</span>
+            <h3>Gnani ASR</h3>
+            <p>
+              The audio is submitted to Gnani and the transcription status
+              is checked until completion.
+            </p>
+          </div>
+
+          <div className="flow-arrow">→</div>
+
+          <div className="flow-card">
+            <span className="flow-number">05</span>
+            <h3>Gemini Summary</h3>
+            <p>
+              The transcript is sent to Gemini and the generated summary
+              is saved in PostgreSQL.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* ===================================================== */}
+      {/* 02 — WHERE DATA LIVES */}
+      {/* ===================================================== */}
+
+      <section className="architecture-section">
+        <div className="section-heading">
+          <span>02</span>
+          <div>
+            <h2>Where Data Lives</h2>
+            <p>
+              Different types of data are kept in the system that best
+              matches their purpose.
+            </p>
+          </div>
+        </div>
+
+        <div className="architecture-grid two-column">
+          <div className="info-card">
+            <h3>Supabase Storage</h3>
+            <p>
+              Audio files are stored in a private <code>audio</code> bucket.
+              The database stores only the file path, not the complete audio
+              binary.
+            </p>
+          </div>
+
+          <div className="info-card">
+            <h3>PostgreSQL</h3>
+            <p>
+              PostgreSQL stores the filename, storage path, processing status,
+              progress, transcript, summary, errors, retry information, and
+              timestamps.
+            </p>
+          </div>
+
+          <div className="info-card">
+            <h3>FastAPI</h3>
+            <p>
+              FastAPI handles uploads, database operations, API responses,
+              retry requests, and background processing.
+            </p>
+          </div>
+
+          <div className="info-card">
+            <h3>Next.js</h3>
+            <p>
+              The frontend displays uploads, history, processing progress,
+              transcripts, summaries, and visible failures.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* ===================================================== */}
+      {/* 03 — LONG AUDIO */}
+      {/* ===================================================== */}
+
+      <section className="architecture-section">
+        <div className="section-heading">
+          <span>03</span>
+          <div>
+            <h2>Handling Long Audio</h2>
+            <p>
+              Processing is separated from the initial upload request so a
+              longer recording does not make the page look frozen.
+            </p>
+          </div>
+        </div>
+
+        <div className="architecture-grid two-column">
+          <div className="info-card">
+            <h3>1. Upload once</h3>
+            <p>
+              The complete audio file is uploaded to Supabase Storage rather
+              than being kept in the API process.
+            </p>
+          </div>
+
+          <div className="info-card">
+            <h3>2. Create a job</h3>
+            <p>
+              PostgreSQL keeps the processing state so the frontend can
+              reopen the recording later.
+            </p>
+          </div>
+
+          <div className="info-card">
+            <h3>3. Process in background</h3>
+            <p>
+              Gnani transcription and Gemini summarization happen after the
+              upload response has already been returned.
+            </p>
+          </div>
+
+          <div className="info-card">
+            <h3>4. Show progress</h3>
+            <p>
+              The backend updates progress and status while the frontend
+              polls the recording endpoint.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* ===================================================== */}
+      {/* 04 — SYNC VS BACKGROUND */}
+      {/* ===================================================== */}
+
+      <section className="architecture-section">
+        <div className="section-heading">
+          <span>04</span>
+          <div>
+            <h2>Sync vs Background</h2>
+            <p>
+              Only the work required to acknowledge the upload is performed
+              synchronously.
+            </p>
+          </div>
+        </div>
+
+        <div className="architecture-grid two-column">
+          <div className="state-card sync-card">
+            <div className="state-badge">SYNCHRONOUS</div>
+
+            <h3>Upload path</h3>
+
+            <ul className="architecture-list">
+              <li>Validate the uploaded file.</li>
+              <li>Save the audio to Supabase Storage.</li>
+              <li>Create the PostgreSQL record.</li>
+              <li>Return the audio ID to the frontend.</li>
+            </ul>
+          </div>
+
+          <div className="state-card background-card">
+            <div className="state-badge">BACKGROUND</div>
+
+            <h3>Processing path</h3>
+
+            <ul className="architecture-list">
+              <li>Create and monitor the Gnani transcription job.</li>
+              <li>Save the completed transcript.</li>
+              <li>Generate the Gemini summary.</li>
+              <li>Update status, progress, and errors.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      {/* ===================================================== */}
+      {/* 05 — FAILURE HANDLING */}
+      {/* ===================================================== */}
+
+      <section className="architecture-section">
+        <div className="section-heading">
+          <span>05</span>
+          <div>
+            <h2>Failure Handling</h2>
+            <p>
+              Provider failures are separated from user-facing messages so
+              technical errors are not exposed directly in the UI.
+            </p>
+          </div>
+        </div>
+
+        <div className="architecture-grid two-column">
+          <div className="info-card">
+            <h3>Upload failure</h3>
+            <p>
+              The database record is marked failed and the frontend receives
+              a simple upload error.
+            </p>
+          </div>
+
+          <div className="info-card">
+            <h3>Gnani failure</h3>
+            <p>
+              The transcription job is marked failed and the user is told
+              that the audio could not be transcribed.
+            </p>
+          </div>
+
+          <div className="info-card">
+            <h3>Gemini failure</h3>
+            <p>
+              The transcript remains available. The UI explains that the
+              summary is temporarily unavailable and can be retried.
+            </p>
+          </div>
+
+          <div className="info-card">
+            <h3>Retry</h3>
+            <p>
+              A retry request resets the relevant state and starts the
+              background processing again.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* ===================================================== */}
+      {/* 06 — PROCESSING STATES */}
+      {/* ===================================================== */}
+
+      <section className="architecture-section">
+        <div className="section-heading">
+          <span>06</span>
+          <div>
+            <h2>Processing States</h2>
+            <p>
+              PostgreSQL acts as the source of truth for the recording state.
+            </p>
+          </div>
+        </div>
+
+        <div className="state-grid">
+          <div className="state-item">
+            <span className="state-dot uploaded-dot"></span>
+            <div>
+              <h3>Uploaded</h3>
+              <p>The file has been stored and is ready for processing.</p>
+            </div>
+          </div>
+
+          <div className="state-item">
+            <span className="state-dot processing-dot"></span>
+            <div>
+              <h3>Processing</h3>
+              <p>Gnani transcription is being created or monitored.</p>
+            </div>
+          </div>
+
+          <div className="state-item">
+            <span className="state-dot transcribed-dot"></span>
+            <div>
+              <h3>Transcribed</h3>
+              <p>The transcript exists and summary generation is pending.</p>
+            </div>
+          </div>
+
+          <div className="state-item">
+            <span className="state-dot completed-dot"></span>
+            <div>
+              <h3>Completed</h3>
+              <p>Both transcript and summary are available.</p>
+            </div>
+          </div>
+
+          <div className="state-item">
+            <span className="state-dot failed-dot"></span>
+            <div>
+              <h3>Failed</h3>
+              <p>
+                Processing stopped and the user is shown a readable error.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ===================================================== */}
+      {/* 07 — TRADEOFFS */}
+      {/* ===================================================== */}
+
+      <section className="architecture-section">
+        <div className="section-heading">
+          <span>07</span>
+          <div>
+            <h2>Design Tradeoffs</h2>
+            <p>
+              The architecture is intentionally simple for this take-home
+              assignment while keeping the long-running processing away from
+              the upload request.
+            </p>
+          </div>
+        </div>
+
+        <div className="tradeoff-card">
+          <h3>Why FastAPI BackgroundTasks?</h3>
+
+          <p>
+            A separate worker service would provide stronger isolation and
+            better durability for a larger production system. For this
+            project, FastAPI background processing keeps the deployment
+            simpler while still separating upload handling from the slower
+            transcription and summarization work.
+          </p>
+
+          <p>
+            With more time and higher traffic, I would move the processing
+            to a dedicated worker queue so jobs survive API restarts,
+            multiple workers can process jobs concurrently, and retries can
+            be handled independently from the web service.
+          </p>
+        </div>
+      </section>
+
+      {/* ===================================================== */}
+      {/* PROJECT */}
+      {/* ===================================================== */}
+
+      <section className="architecture-project">
+        <div>
+          <p className="section-label">PROJECT</p>
+          <h2>Source code</h2>
+          <p>
+            The complete frontend and backend implementation is available on
+            GitHub.
+          </p>
+        </div>
 
         <Link
-          href="/"
-          className="back-link"
+          href="https://github.com/Rithish1808/audio-notes-platform-"
+          target="_blank"
+          className="project-link"
         >
-          ← Back to Upload
+          github.com/Rithish1808/audio-notes-platform- ↗
         </Link>
-
-      </div>
-
-
-      <div className="architecture-grid">
-
-        {/* ================================================= */}
-        {/* 01 OVERALL FLOW */}
-        {/* ================================================= */}
-
-        <section className="architecture-card">
-
-          <div className="architecture-number">
-            01
-          </div>
-
-          <h2>
-            Overall Flow
-          </h2>
-
-          <p className="architecture-description">
-            The upload request is kept small and fast.
-            Long-running transcription and summarization
-            happen in the background worker.
-          </p>
-
-          <div className="architecture-flow">
-
-            <div className="architecture-flow-card">
-              <span className="flow-number">
-                01
-              </span>
-
-              <h3>
-                User
-              </h3>
-
-              <p>
-                Selects an audio recording from
-                the browser.
-              </p>
-            </div>
-
-
-            <div className="flow-arrow">
-              →
-            </div>
-
-
-            <div className="architecture-flow-card">
-              <span className="flow-number">
-                02
-              </span>
-
-              <h3>
-                Next.js
-              </h3>
-
-              <p>
-                Sends the upload request and
-                displays processing progress.
-              </p>
-            </div>
-
-
-            <div className="flow-arrow">
-              →
-            </div>
-
-
-            <div className="architecture-flow-card">
-              <span className="flow-number">
-                03
-              </span>
-
-              <h3>
-                FastAPI
-              </h3>
-
-              <p>
-                Receives the file, stores it,
-                and creates a database job.
-              </p>
-            </div>
-
-
-            <div className="flow-arrow">
-              →
-            </div>
-
-
-            <div className="architecture-flow-card">
-              <span className="flow-number">
-                04
-              </span>
-
-              <h3>
-                Background Worker
-              </h3>
-
-              <p>
-                Performs transcription and
-                summary generation.
-              </p>
-            </div>
-
-
-            <div className="flow-arrow">
-              →
-            </div>
-
-
-            <div className="architecture-flow-card">
-              <span className="flow-number">
-                05
-              </span>
-
-              <h3>
-                Completed
-              </h3>
-
-              <p>
-                Transcript and summary are
-                available from History.
-              </p>
-            </div>
-
-          </div>
-
-        </section>
-
-
-        {/* ================================================= */}
-        {/* 02 DATA STORAGE */}
-        {/* ================================================= */}
-
-        <section className="architecture-card">
-
-          <div className="architecture-number">
-            02
-          </div>
-
-          <h2>
-            Where Data Lives
-          </h2>
-
-          <p className="architecture-description">
-            Audio files and application metadata are
-            stored separately.
-          </p>
-
-          <div className="architecture-two-column">
-
-            <div className="architecture-info-box">
-
-              <h3>
-                Supabase Storage
-              </h3>
-
-              <p>
-                Stores the actual audio files in
-                a private storage bucket.
-              </p>
-
-            </div>
-
-            <div className="architecture-info-box">
-
-              <h3>
-                PostgreSQL
-              </h3>
-
-              <p>
-                Stores filename, storage path,
-                status, progress, transcript,
-                summary, retry information,
-                and error state.
-              </p>
-
-            </div>
-
-          </div>
-
-        </section>
-
-
-        {/* ================================================= */}
-        {/* 03 LONG AUDIO */}
-        {/* ================================================= */}
-
-        <section className="architecture-card">
-
-          <div className="architecture-number">
-            03
-          </div>
-
-          <h2>
-            Handling Long Audio
-          </h2>
-
-          <p className="architecture-description">
-            The API does not wait for transcription and
-            summarization to finish.
-          </p>
-
-          <div className="architecture-info-box">
-
-            <h3>
-              Background processing
-            </h3>
-
-            <p>
-              After the upload completes, the worker
-              creates a temporary signed URL for the
-              private audio file and submits it to
-              Gnani Batch STT. The worker polls the
-              transcription job and stores the result
-              in PostgreSQL before generating the AI
-              summary.
-            </p>
-
-          </div>
-
-        </section>
-
-
-        {/* ================================================= */}
-        {/* 04 SYNC VS BACKGROUND */}
-        {/* ================================================= */}
-
-        <section className="architecture-card">
-
-          <div className="architecture-number">
-            04
-          </div>
-
-          <h2>
-            Sync vs Background Work
-          </h2>
-
-          <div className="architecture-two-column">
-
-            <div className="architecture-info-box">
-
-              <h3>
-                Synchronous
-              </h3>
-
-              <p>
-                Upload validation, temporary file
-                creation, storage upload, and creation
-                of the database record happen during
-                the API request.
-              </p>
-
-            </div>
-
-            <div className="architecture-info-box">
-
-              <h3>
-                Background
-              </h3>
-
-              <p>
-                Gnani transcription, polling, transcript
-                retrieval, Gemini summarization, retries,
-                and failure recovery run in the worker.
-              </p>
-
-            </div>
-
-          </div>
-
-        </section>
-
-
-        {/* ================================================= */}
-        {/* 05 FAILURE HANDLING */}
-        {/* ================================================= */}
-
-        <section className="architecture-card">
-
-          <div className="architecture-number">
-            05
-          </div>
-
-          <h2>
-            Failure Handling
-          </h2>
-
-          <p className="architecture-description">
-            Provider failures are handled without exposing
-            raw API responses to the user.
-          </p>
-
-          <div className="architecture-list">
-
-            <div>
-              <strong>
-                Upload failure
-              </strong>
-
-              <span>
-                The API returns a clean user-facing
-                upload error.
-              </span>
-            </div>
-
-            <div>
-              <strong>
-                Gnani failure
-              </strong>
-
-              <span>
-                The failed provider job is discarded,
-                and bounded retries can create a fresh
-                Gnani job.
-              </span>
-            </div>
-
-            <div>
-              <strong>
-                Gemini failure
-              </strong>
-
-              <span>
-                The transcript is preserved while the
-                summary is retried separately.
-              </span>
-            </div>
-
-            <div>
-              <strong>
-                Retry scheduling
-              </strong>
-
-              <span>
-                Retry delays are stored in PostgreSQL so
-                one failed job does not block newer uploads.
-              </span>
-            </div>
-
-          </div>
-
-        </section>
-
-
-        {/* ================================================= */}
-        {/* 06 PROCESSING STATES */}
-        {/* ================================================= */}
-
-        <section className="architecture-card">
-
-          <div className="architecture-number">
-            06
-          </div>
-
-          <h2>
-            Processing States
-          </h2>
-
-          <div className="state-flow">
-
-            <span>
-              Uploaded
-            </span>
-
-            <b>→</b>
-
-            <span>
-              Processing
-            </span>
-
-            <b>→</b>
-
-            <span>
-              Transcribed
-            </span>
-
-            <b>→</b>
-
-            <span>
-              Completed
-            </span>
-
-          </div>
-
-          <p className="architecture-description">
-            If transcription or summarization fails,
-            the corresponding error is stored and the
-            user can retry from the recording page.
-          </p>
-
-        </section>
-
-
-        {/* ================================================= */}
-        {/* 07 TRADEOFFS */}
-        {/* ================================================= */}
-
-        <section className="architecture-card">
-
-          <div className="architecture-number">
-            07
-          </div>
-
-          <h2>
-            Design Tradeoffs
-          </h2>
-
-          <div className="architecture-list">
-
-            <div>
-              <strong>
-                Why a background worker?
-              </strong>
-
-              <span>
-                Long-running external API calls should
-                not keep an HTTP request open.
-              </span>
-            </div>
-
-            <div>
-              <strong>
-                Why object storage?
-              </strong>
-
-              <span>
-                Audio files are stored outside PostgreSQL,
-                while PostgreSQL keeps only metadata and
-                generated text.
-              </span>
-            </div>
-
-            <div>
-              <strong>
-                Why persist retry state?
-              </strong>
-
-              <span>
-                A worker restart should not cause repeated
-                provider requests or lose retry progress.
-              </span>
-            </div>
-
-          </div>
-
-        </section>
-
-
-        {/* ================================================= */}
-        {/* GITHUB */}
-        {/* ================================================= */}
-
-        <section className="architecture-card architecture-github-card">
-
-          <div>
-
-            <div className="architecture-number">
-              PROJECT
-            </div>
-
-            <h2>
-              Source Code
-            </h2>
-
-            <p>
-              The complete implementation and setup
-              instructions are available in the GitHub
-              repository.
-            </p>
-
-          </div>
-
-          <a
-            href="https://github.com/your-username/your-repository"
-            target="_blank"
-            rel="noreferrer"
-            className="architecture-github"
-          >
-            View GitHub Repository →
-          </a>
-
-        </section>
-
-      </div>
-
-    </section>
+      </section>
+    </div>
   );
 }
