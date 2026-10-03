@@ -1,51 +1,95 @@
 "use client";
 
 import Link from "next/link";
-import {
-  useCallback,
-  useEffect,
-  useState,
-} from "react";
+import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
+
+type AudioData = {
+  id: string;
+  filename: string;
+  content_type?: string | null;
+  status: string;
+  transcript?: string | null;
+  summary?: string | null;
+  error_message?: string | null;
+  progress?: number | null;
+  created_at?: string | null;
+  gnani_retry_count?: number;
+  gemini_retry_count?: number;
+  next_retry_at?: string | null;
+};
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL ||
   "http://127.0.0.1:8000";
 
-type AudioFile = {
-  id: string;
-  filename: string;
-  status: string;
-  transcript?: string | null;
-  summary?: string | null;
-  error_message?: string | null;
-  progress_percent: number;
-  created_at: string;
+const getProgress = (audio: AudioData | null) => {
+  const value = audio?.progress ?? 0;
+
+  return Math.min(
+    100,
+    Math.max(0, Number(value) || 0)
+  );
 };
 
-type Props = {
-  params: Promise<{
-    id: string;
-  }>;
+const getStatusLabel = (status: string) => {
+  switch (status) {
+    case "uploaded":
+      return "Uploaded";
+
+    case "processing":
+      return "Processing";
+
+    case "transcribed":
+      return "Transcript ready";
+
+    case "completed":
+      return "Completed";
+
+    case "failed":
+      return "Failed";
+
+    default:
+      return status;
+  }
+};
+
+const getProcessingMessage = (
+  audio: AudioData
+) => {
+  if (audio.status === "uploaded") {
+    return "Preparing your audio for processing.";
+  }
+
+  if (
+    audio.status === "processing" &&
+    getProgress(audio) < 80
+  ) {
+    return "Your recording is being transcribed.";
+  }
+
+  if (
+    audio.status === "transcribed" &&
+    !audio.summary
+  ) {
+    return "Your transcript is ready. Generating the summary.";
+  }
+
+  return "Your recording is being processed.";
 };
 
 export default function AudioDetailPage({
   params,
-}: Props) {
-  const [audio, setAudio] =
-    useState<AudioFile | null>(null);
-
-  const [loading, setLoading] =
-    useState(true);
-
-  const [pageError, setPageError] =
-    useState("");
-
-  const [retrying, setRetrying] =
-    useState(false);
-
-  const [audioId, setAudioId] =
-    useState("");
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const [audioId, setAudioId] = useState("");
+  const [audio, setAudio] = useState<AudioData | null>(
+    null
+  );
+  const [loading, setLoading] = useState(true);
+  const [retrying, setRetrying] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     params.then((value) => {
@@ -53,12 +97,16 @@ export default function AudioDetailPage({
     });
   }, [params]);
 
-  const loadAudio = useCallback(
-    async () => {
-      if (!audioId) {
-        return;
-      }
+  useEffect(() => {
+    if (!audioId) {
+      return;
+    }
 
+    let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | null =
+      null;
+
+    const loadAudio = async () => {
       try {
         const response = await fetch(
           `${API_URL}/audio/${audioId}`,
@@ -69,404 +117,344 @@ export default function AudioDetailPage({
 
         if (!response.ok) {
           throw new Error(
-            "Failed to load recording."
+            "Failed to load audio."
           );
         }
 
-        const data =
+        const data: AudioData =
           await response.json();
 
-        setAudio(data);
-        setPageError("");
+        if (!cancelled) {
+          setAudio(data);
+          setLoading(false);
+          setError("");
+        }
 
+        const shouldPoll =
+          data.status === "uploaded" ||
+          data.status === "processing" ||
+          (
+            data.status === "transcribed" &&
+            !data.summary &&
+            !data.error_message
+          );
+
+        if (
+          shouldPoll &&
+          !intervalId
+        ) {
+          intervalId = setInterval(
+            loadAudio,
+            5000
+          );
+        }
+
+        if (
+          !shouldPoll &&
+          intervalId
+        ) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
       } catch {
-        setPageError(
-          "We couldn't load this recording right now. Please try again."
-        );
-
-      } finally {
-        setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setError(
+            "We couldn't load this recording right now. Please try again."
+          );
+        }
       }
-    },
-    [audioId]
-  );
+    };
 
-  useEffect(() => {
     loadAudio();
-  }, [loadAudio]);
-
-  useEffect(() => {
-    if (!audio) {
-      return;
-    }
-
-    const shouldPoll =
-      audio.status === "uploaded" ||
-      audio.status === "processing" ||
-      (
-        audio.status === "transcribed" &&
-        !audio.summary &&
-        !audio.error_message
-      );
-
-    if (!shouldPoll) {
-      return;
-    }
-
-    const interval = setInterval(
-      loadAudio,
-      5000
-    );
 
     return () => {
-      clearInterval(interval);
-    };
-  }, [audio, loadAudio]);
+      cancelled = true;
 
-  async function handleRetry() {
-    if (!audio) {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [audioId]);
+
+  const handleRetry = async () => {
+    if (!audioId) {
       return;
     }
 
-    try {
-      setRetrying(true);
-      setPageError("");
+    setRetrying(true);
+    setError("");
 
+    try {
       const response = await fetch(
-        `${API_URL}/audio/${audio.id}/retry`,
+        `${API_URL}/audio/${audioId}/retry`,
         {
           method: "POST",
         }
       );
 
       if (!response.ok) {
-        const body =
-          await response
-            .json()
-            .catch(() => null);
-
         throw new Error(
-          body?.detail ||
-            "Retry failed."
+          "Retry failed."
         );
       }
 
-      await loadAudio();
+      const data: AudioData =
+        await fetch(
+          `${API_URL}/audio/${audioId}`,
+          {
+            cache: "no-store",
+          }
+        ).then((res) => res.json());
 
+      setAudio(data);
     } catch {
-      setPageError(
-        "We couldn't restart processing. Please try again."
+      setError(
+        "We couldn't restart processing right now. Please try again."
       );
-
     } finally {
       setRetrying(false);
     }
-  }
+  };
 
   if (loading) {
     return (
-      <section className="page-section">
-        <div className="page-state">
+      <div className="detail-page">
+        <div className="detail-loading">
           Loading recording...
         </div>
-      </section>
+      </div>
     );
   }
 
   if (!audio) {
     return (
-      <section className="page-section">
-
-        <div className="page-state error-state">
-          {pageError ||
-            "Recording not found."}
-        </div>
-
+      <div className="detail-page">
         <Link
           href="/history"
-          className="secondary-button"
+          className="back-link"
         >
-          Back to history
+          ← Back to history
         </Link>
 
-      </section>
+        <div className="detail-error">
+          <h2>Recording not found</h2>
+          <p>
+            We couldn't find this recording.
+          </p>
+        </div>
+      </div>
     );
   }
 
+  const progress = getProgress(audio);
   const isProcessing =
     audio.status === "uploaded" ||
     audio.status === "processing";
 
-  const summaryFailed =
+  const summaryPending =
     audio.status === "transcribed" &&
-    !!audio.error_message &&
-    !audio.summary;
+    !audio.summary &&
+    !audio.error_message;
 
-  const permanentlyFailed =
-    audio.status === "failed";
-
-  let statusLabel = "Processing";
-
-  if (audio.status === "uploaded") {
-    statusLabel = "Queued";
-  }
-
-  if (audio.status === "processing") {
-    statusLabel = "Processing";
-  }
-
-  if (audio.status === "transcribed") {
-    statusLabel = summaryFailed
-      ? "Summary unavailable"
-      : "Transcript ready";
-  }
-
-  if (audio.status === "completed") {
-    statusLabel = "Completed";
-  }
-
-  if (audio.status === "failed") {
-    statusLabel = "Failed";
-  }
+  const showProcessingCard =
+    isProcessing || summaryPending;
 
   return (
-    <section className="page-section detail-page">
-
-      {/* Header */}
-
-      <div className="detail-header">
-
-        <div>
-
-          <Link
-            href="/history"
-            className="back-link"
-          >
-            ← Back to history
-          </Link>
-
-          <h1 className="detail-title">
-            {audio.filename}
-          </h1>
-
-          <p className="detail-date">
-            Uploaded{" "}
-            {new Date(
-              audio.created_at
-            ).toLocaleString()}
-          </p>
-
-        </div>
+    <div className="detail-page">
+      <div className="detail-top">
+        <Link
+          href="/history"
+          className="back-link"
+        >
+          ← Back to history
+        </Link>
 
         <span
           className={`status-badge status-${audio.status}`}
         >
-          {statusLabel}
+          {getStatusLabel(audio.status)}
         </span>
-
       </div>
 
+      <div className="detail-title-row">
+        <div>
+          <h1 className="detail-title">
+            {audio.filename}
+          </h1>
 
-      {/* Page-level error */}
+          {audio.created_at && (
+            <p className="detail-date">
+              Uploaded{" "}
+              {new Date(
+                audio.created_at
+              ).toLocaleString()}
+            </p>
+          )}
+        </div>
+      </div>
 
-      {pageError && (
-        <div className="inline-error">
-          {pageError}
+      {error && (
+        <div className="detail-error">
+          <p>{error}</p>
         </div>
       )}
 
+      {/* ================================================== */}
+      {/* PROCESSING */}
+      {/* ================================================== */}
 
-      {/* Processing */}
-
-      {isProcessing && (
-        <div className="processing-card">
-
+      {showProcessingCard && (
+        <section className="processing-card">
           <div className="processing-header">
-
             <div>
-
               <h2>
-                Processing your audio
+                {summaryPending
+                  ? "Generating your summary"
+                  : "Processing your audio"}
               </h2>
 
               <p>
-                Your recording is being
-                transcribed and summarized.
+                {getProcessingMessage(audio)}
               </p>
-
             </div>
 
-            <strong>
-              {audio.progress_percent}%
-            </strong>
-
+            <div className="processing-percent">
+              {progress}%
+            </div>
           </div>
 
           <div className="progress-track">
-
             <div
               className="progress-fill"
               style={{
-                width:
-                  `${audio.progress_percent}%`,
+                width: `${progress}%`,
               }}
             />
-
           </div>
 
-          <p className="processing-step">
-
-            {audio.progress_percent < 20 &&
-              "Preparing transcription..."}
-
-            {audio.progress_percent >= 20 &&
-              audio.progress_percent < 80 &&
-              "Transcribing your audio..."}
-
-            {audio.progress_percent >= 80 &&
-              "Generating your summary..."}
-
-          </p>
-
-        </div>
+          <div className="processing-step">
+            {progress < 80
+              ? "Transcribing with Gnani..."
+              : "Generating your summary..."}
+          </div>
+        </section>
       )}
 
+      {/* ================================================== */}
+      {/* FAILED */}
+      {/* ================================================== */}
 
-      {/* Permanent failure */}
-
-      {permanentlyFailed && (
-        <div className="failure-card">
-
+      {audio.status === "failed" && (
+        <section className="detail-error">
           <div>
-
             <h2>
-              We couldn't finish processing
-              this recording.
+              Processing failed
             </h2>
 
             <p>
               {audio.error_message ||
                 "Something went wrong while processing this audio."}
             </p>
-
           </div>
 
           <button
-            className="primary-button"
+            type="button"
             onClick={handleRetry}
             disabled={retrying}
+            className="retry-button"
           >
             {retrying
               ? "Retrying..."
               : "Retry"}
           </button>
-
-        </div>
+        </section>
       )}
 
-
-      {/* Transcript */}
+      {/* ================================================== */}
+      {/* TRANSCRIPT */}
+      {/* ================================================== */}
 
       {audio.transcript && (
         <section className="content-card">
-
           <div className="content-card-header">
-
             <div>
-
-              <p className="section-label">
+              <p className="content-label">
                 TRANSCRIPT
               </p>
 
               <h2>
                 Transcript
               </h2>
-
             </div>
-
           </div>
 
           <div className="transcript-content">
             {audio.transcript}
           </div>
-
         </section>
       )}
 
+      {/* ================================================== */}
+      {/* GEMINI ERROR */}
+      {/* ================================================== */}
 
-      {/* Summary failure */}
+      {audio.status === "transcribed" &&
+        !audio.summary &&
+        audio.error_message && (
+          <section className="detail-error">
+            <div>
+              <h2>
+                Summary unavailable
+              </h2>
 
-      {summaryFailed && (
-        <section
-          className="content-card summary-error-card"
-        >
-
-          <div className="summary-error-content">
-
-            <p className="section-label">
-              SUMMARY
-            </p>
-
-            <h2>
-              Summary temporarily unavailable
-            </h2>
-
-            <p>
-              {audio.error_message}
-            </p>
+              <p>
+                {audio.error_message}
+              </p>
+            </div>
 
             <button
-              className="primary-button"
+              type="button"
               onClick={handleRetry}
               disabled={retrying}
+              className="retry-button"
             >
               {retrying
                 ? "Retrying..."
-                : "Retry summary"}
+                : "Retry"}
             </button>
+          </section>
+        )}
 
-          </div>
-
-        </section>
-      )}
-
-
-      {/* Successful summary */}
+      {/* ================================================== */}
+      {/* SUMMARY */}
+      {/* ================================================== */}
 
       {audio.summary && (
-        <section className="content-card">
-
+        <section className="content-card summary-card">
           <div className="content-card-header">
-
             <div>
-
-              <p className="section-label">
-                AI SUMMARY
+              <p className="content-label">
+                GENERATED SUMMARY
               </p>
 
               <h2>
                 Key Takeaways
               </h2>
-
             </div>
 
-            <span className="status-badge status-completed">
-              ✓ Generated
+            <span className="generated-badge">
+              Gemini
             </span>
-
           </div>
 
           <div className="markdown-content">
-
             <ReactMarkdown>
               {audio.summary}
             </ReactMarkdown>
-
           </div>
-
         </section>
       )}
-
-    </section>
+    </div>
   );
 }
