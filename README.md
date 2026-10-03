@@ -21,6 +21,9 @@ A full-stack audio processing platform built with **Next.js, FastAPI, PostgreSQL
 
 ---
 
+> ⚠️ **Current Access Model:** Authentication is not implemented yet. Currently, all uploaded audio recordings and their transcripts/summaries are visible to every user of the application. User-specific access control and authentication are planned as future improvements.
+
+
 ## 🌐 Live Demo
 
 **[Open Audio Notes Platform](https://audio-notes-platform-psi.vercel.app/)**
