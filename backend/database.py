@@ -1,7 +1,7 @@
 import os
-
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text , Session
+from models import AudioFile
 
 load_dotenv()
 
@@ -12,15 +12,10 @@ if not DATABASE_URL:
 
 engine = create_engine(DATABASE_URL)
 
-
 def test_connection():
     with engine.connect() as connection:
         result = connection.execute(text("SELECT 1"))
         return result.scalar()
-
-
-from sqlalchemy.orm import Session
-from models import AudioFile
 
 
 def save_transcript(storage_path: str, transcript: str):
@@ -41,9 +36,6 @@ def save_transcript(storage_path: str, transcript: str):
         db.commit()
 
         return audio_file.id
-
-from sqlalchemy.orm import Session
-from models import AudioFile
 
 
 def save_transcript(storage_path: str, transcript: str):

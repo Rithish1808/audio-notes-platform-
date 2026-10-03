@@ -2,11 +2,9 @@ import time
 
 from requests.exceptions import HTTPError
 from sqlalchemy.orm import Session
-
 from database import engine
 from models import AudioFile
 from storage import supabase
-
 from gnani_service import (
     create_transcription_job,
     start_transcription_job,
@@ -14,14 +12,8 @@ from gnani_service import (
     get_transcription_files,
     download_transcript,
 )
-
 from gemini_service import generate_summary
 from error import get_user_friendly_error
-
-
-# ============================================================
-# DATABASE HELPERS
-# ============================================================
 
 
 def update_job(audio_id: str, **fields):
@@ -69,12 +61,8 @@ def get_audio_job(audio_id: str):
             "status": audio_file.status,
             "transcript": audio_file.transcript,
             "summary": audio_file.summary,
+            "progress_percent": audio_file.progress_percent,
         }
-
-
-# ============================================================
-# GNANI JOB CREATION
-# ============================================================
 
 
 def create_gnani_job(job):
@@ -107,8 +95,6 @@ def create_gnani_job(job):
 
     print("Gnani job created:", gnani_job_id)
 
-    # Save immediately so that if the process is interrupted,
-    # we don't create a duplicate Gnani job later.
     update_job(
         job["id"],
         gnani_job_id=gnani_job_id,
@@ -117,11 +103,6 @@ def create_gnani_job(job):
     )
 
     return gnani_job_id
-
-
-# ============================================================
-# GNANI START
-# ============================================================
 
 
 def start_gnani_job(job_id: str):
@@ -162,11 +143,6 @@ def start_gnani_job(job_id: str):
     )
 
 
-# ============================================================
-# GNANI TRANSCRIPTION
-# ============================================================
-
-
 def process_transcription(job):
     """
     Process one audio file through Gnani.
@@ -176,10 +152,6 @@ def process_transcription(job):
     """
 
     audio_id = job["id"]
-
-    # --------------------------------------------------------
-    # 1. Get existing Gnani job or create a new one
-    # --------------------------------------------------------
 
     gnani_job_id = job["gnani_job_id"]
 
@@ -191,10 +163,6 @@ def process_transcription(job):
             gnani_job_id,
         )
 
-    # --------------------------------------------------------
-    # 2. Check current Gnani status
-    # --------------------------------------------------------
-
     status_response = get_transcription_status(
         gnani_job_id
     )
@@ -205,10 +173,6 @@ def process_transcription(job):
         "Gnani status:",
         status,
     )
-
-    # --------------------------------------------------------
-    # 3. Start if job is still CREATED
-    # --------------------------------------------------------
 
     if status == "CREATED":
 
@@ -228,9 +192,6 @@ def process_transcription(job):
             progress_percent=20,
         )
 
-    # --------------------------------------------------------
-    # 4. Poll until Gnani finishes
-    # --------------------------------------------------------
 
     while True:
 
@@ -258,11 +219,14 @@ def process_transcription(job):
 
         if percent is not None:
 
-            # Keep room for transcript download
-            # and Gemini processing.
-            db_percent = min(
+            reported_percent = min(
                 int(percent),
                 95,
+            )
+
+            db_percent = max(
+                job.get("progress_percent", 0) or 0,
+                reported_percent,
             )
 
             update_job(
@@ -270,13 +234,13 @@ def process_transcription(job):
                 progress_percent=db_percent,
             )
 
+            job["progress_percent"] = db_percent
+
         if status == "COMPLETED":
             break
 
         if status in ["FAILED", "CANCELLED"]:
 
-            # Clear the provider job ID because this
-            # provider job can no longer be resumed.
             update_job(
                 audio_id,
                 gnani_job_id=None,
@@ -287,10 +251,6 @@ def process_transcription(job):
             )
 
         time.sleep(10)
-
-    # --------------------------------------------------------
-    # 5. Get transcript file
-    # --------------------------------------------------------
 
     update_job(
         audio_id,
@@ -313,10 +273,6 @@ def process_transcription(job):
         "transcript_url"
     ]
 
-    # --------------------------------------------------------
-    # 6. Download transcript JSON
-    # --------------------------------------------------------
-
     transcript_data = download_transcript(
         transcript_url
     )
@@ -335,9 +291,6 @@ def process_transcription(job):
     print("Transcript:")
     print(transcript)
 
-    # --------------------------------------------------------
-    # 7. Save transcript
-    # --------------------------------------------------------
 
     update_job(
         audio_id,
@@ -352,11 +305,6 @@ def process_transcription(job):
     print("✅ Transcript saved")
 
     return transcript
-
-
-# ============================================================
-# GEMINI SUMMARY
-# ============================================================
 
 
 def process_summary(job, transcript):
@@ -391,9 +339,6 @@ def process_summary(job, transcript):
     print("Summary:")
     print(summary)
 
-    # --------------------------------------------------------
-    # Save final result
-    # --------------------------------------------------------
 
     update_job(
         audio_id,
@@ -408,10 +353,6 @@ def process_summary(job, transcript):
     print("✅ Summary saved")
     print("✅ Job completed")
 
-
-# ============================================================
-# PROCESS ONE JOB
-# ============================================================
 
 
 def process_job(job):
@@ -429,11 +370,6 @@ def process_job(job):
     print("Current status:", job["status"])
     print("=" * 60)
 
-    # --------------------------------------------------------
-    # CASE 1:
-    # Transcript already exists
-    # Only Gemini is required.
-    # --------------------------------------------------------
 
     if (
         job["status"] == "transcribed"
@@ -475,11 +411,6 @@ def process_job(job):
 
         return
 
-    # --------------------------------------------------------
-    # CASE 2:
-    # Audio still needs transcription
-    # --------------------------------------------------------
-
     try:
 
         transcript = process_transcription(
@@ -506,11 +437,6 @@ def process_job(job):
 
         return
 
-    # --------------------------------------------------------
-    # CASE 3:
-    # Gnani succeeded -> Gemini
-    # --------------------------------------------------------
-
     try:
 
         process_summary(
@@ -525,7 +451,6 @@ def process_job(job):
             repr(error),
         )
 
-        # Transcript succeeded, so keep it.
         update_job(
             job["id"],
             status="transcribed",
@@ -540,11 +465,6 @@ def process_job(job):
         print(
             "Transcript is safe."
         )
-
-
-# ============================================================
-# FASTAPI BACKGROUND ENTRY POINT
-# ============================================================
 
 
 def process_audio_job(audio_id: str):
@@ -576,7 +496,6 @@ def process_audio_job(audio_id: str):
 
         return
 
-    # A newly uploaded file is now being processed.
     if job["status"] == "uploaded":
 
         update_job(

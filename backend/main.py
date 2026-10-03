@@ -20,11 +20,6 @@ from models import AudioFile
 from storage import supabase
 from worker import process_audio_job
 
-
-# ============================================================
-# CONFIG
-# ============================================================
-
 load_dotenv()
 
 frontend_url = os.getenv(
@@ -41,10 +36,6 @@ if frontend_url not in allowed_origins:
     allowed_origins.append(frontend_url)
 
 
-# ============================================================
-# FASTAPI APP
-# ============================================================
-
 app = FastAPI(
     title="Audio Notes API",
     description="Backend for the Audio Notes Platform",
@@ -60,22 +51,11 @@ app.add_middleware(
 )
 
 
-# ============================================================
-# HOME
-# ============================================================
-
-
 @app.get("/")
 def home():
     return {
         "message": "Audio Notes API is running"
     }
-
-
-# ============================================================
-# UPLOAD
-# ============================================================
-
 
 @app.post("/upload")
 async def upload_audio(
@@ -88,19 +68,11 @@ async def upload_audio(
     in the background.
     """
 
-    # --------------------------------------------------------
-    # Validate filename
-    # --------------------------------------------------------
-
     if not file.filename:
         raise HTTPException(
             status_code=400,
             detail="Please select an audio file.",
         )
-
-    # --------------------------------------------------------
-    # Validate content type
-    # --------------------------------------------------------
 
     if not file.content_type:
         raise HTTPException(
@@ -118,10 +90,6 @@ async def upload_audio(
 
     try:
 
-        # ----------------------------------------------------
-        # Create storage path
-        # ----------------------------------------------------
-
         file_extension = ""
 
         if "." in file.filename:
@@ -131,8 +99,6 @@ async def upload_audio(
 
         audio_id = None
 
-        # Generate the DB ID first so that the storage path
-        # is unique and connected to the database record.
         with Session(engine) as db:
 
             audio_file = AudioFile(
@@ -156,10 +122,6 @@ async def upload_audio(
             f"uploads/{audio_id}{file_extension}"
         )
 
-        # ----------------------------------------------------
-        # Save upload temporarily on disk
-        # ----------------------------------------------------
-
         with tempfile.NamedTemporaryFile(
             delete=False,
             suffix=file_extension,
@@ -172,10 +134,6 @@ async def upload_audio(
                 temp_file,
                 length=1024 * 1024,
             )
-
-        # ----------------------------------------------------
-        # Upload temporary file to Supabase Storage
-        # ----------------------------------------------------
 
         with open(
             temp_file_path,
@@ -192,10 +150,6 @@ async def upload_audio(
                     )
                 },
             )
-
-        # ----------------------------------------------------
-        # Save final storage path in database
-        # ----------------------------------------------------
 
         with Session(engine) as db:
 
@@ -219,10 +173,6 @@ async def upload_audio(
 
             db.commit()
 
-        # ----------------------------------------------------
-        # Start background processing
-        # ----------------------------------------------------
-
         background_tasks.add_task(
             process_audio_job,
             audio_id,
@@ -245,8 +195,6 @@ async def upload_audio(
             repr(error),
         )
 
-        # If the DB record was created but storage upload
-        # failed, mark that record as failed.
         if audio_id:
 
             try:
@@ -299,12 +247,6 @@ async def upload_audio(
         ):
             os.remove(temp_file_path)
 
-
-# ============================================================
-# LIST AUDIO FILES
-# ============================================================
-
-
 @app.get("/audio")
 def list_audio():
     """
@@ -341,17 +283,10 @@ def list_audio():
             for audio_file in audio_files
         ]
 
-
-# ============================================================
-# GET ONE AUDIO FILE
-# ============================================================
-
-
 @app.get("/audio/{audio_id}")
 def get_audio(audio_id: str):
     """
-    Return one audio record with transcript,
-    summary, progress and processing status.
+    Return one audio record with transcript, summary, progress and processing status.
     """
 
     with Session(engine) as db:
@@ -397,20 +332,13 @@ def get_audio(audio_id: str):
             ),
         }
 
-
-# ============================================================
-# RETRY
-# ============================================================
-
-
 @app.post("/audio/{audio_id}/retry")
 def retry_audio(
     audio_id: str,
     background_tasks: BackgroundTasks,
 ):
     """
-    Reset a failed job and process it again
-    in the background.
+    Reset a failed job and process it again in the background.
     """
 
     with Session(engine) as db:
@@ -429,11 +357,6 @@ def retry_audio(
                 detail="Audio file not found.",
             )
 
-        # ----------------------------------------------------
-        # Case 1:
-        # Transcript already exists.
-        # Only Gemini needs to run again.
-        # ----------------------------------------------------
 
         if audio_file.transcript:
 
@@ -443,11 +366,6 @@ def retry_audio(
             audio_file.gemini_retry_count = 0
             audio_file.next_retry_at = None
 
-        # ----------------------------------------------------
-        # Case 2:
-        # No transcript.
-        # Start from Gnani again.
-        # ----------------------------------------------------
 
         else:
 
@@ -460,10 +378,6 @@ def retry_audio(
             audio_file.next_retry_at = None
 
         db.commit()
-
-    # --------------------------------------------------------
-    # Start processing in the background
-    # --------------------------------------------------------
 
     background_tasks.add_task(
         process_audio_job,
