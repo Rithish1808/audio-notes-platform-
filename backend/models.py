@@ -1,4 +1,5 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from uuid import uuid4
 
 from sqlalchemy import String, DateTime, Text, Integer
@@ -78,5 +79,5 @@ class AudioFile(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=lambda: datetime.now(ZoneInfo("Asia/Kolkata"))
     )
