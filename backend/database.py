@@ -1,7 +1,8 @@
 import os
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text , Session
+from sqlalchemy import create_engine, text
 from models import AudioFile
+from sqlalchemy.orm import Session
 
 load_dotenv()
 
